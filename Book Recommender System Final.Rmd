@@ -1,0 +1,451 @@
+---
+title: "Final r code for Book Recommender System"
+author: "Gayathri Ganesh"
+date: "April 12, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r libraries}
+library(recommenderlab)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(DT)
+library(knitr)
+library(grid)
+library(gridExtra)
+library(corrplot)
+library(qgraph)
+library(ggraph)
+library(methods)
+library(Matrix)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r}
+getwd()
+setwd("C:/Users/ram/Desktop/Project")
+```
+
+```{r}
+books<-fread('books.csv')
+ratings <- fread('ratings.csv')
+book_tags <- fread('book_tags.csv')
+tags <- fread('tags.csv')
+```
+
+```{r}
+#### Ratings.csv
+datatable(head(ratings, 10), class = "nowrap hover row-border", options = list(dom = 't',scrollX = FALSE, autoWidth = TRUE))
+glimpse(ratings)
+
+#### Books.csv
+datatable(head(books,5),  class = "nowrap hover row-border", options = list(dom = 't',scrollX = TRUE, autoWidth=TRUE, columnDefs = list(list(width = '200px', targets = c(8)),list(width = '300px', targets = c(10,11)))))
+glimpse(books)
+
+#### Book_tags.csv
+datatable(head(book_tags, 10), class = "nowrap hover row-border", options = list(dom = 't',scrollX = FALSE, autoWidth = TRUE))
+glimpse(book_tags)
+
+#### Tags.csv
+datatable(sample_n(tags, 10), class = "nowrap hover row-border", options = list(dom = 't',scrollX = FALSE, autoWidth = TRUE))
+glimpse(tags)
+
+```
+
+```{r}
+### Clean the dataset
+#Remove duplicate ratings
+ratings[, N := .N, .(user_id, book_id)]
+## corresponding dplyr code
+# ratings %>% group_by(user_id, book_id) %>% mutate(n=n())
+cat('Duplicate ratings: ', nrow(ratings[N > 1]))
+ratings <- ratings[N == 1]
+
+#Remove users who rated fewer than 4 books
+ratings[, N := .N, .(user_id)]
+## corresponding dplyr code
+# ratings %>% group_by(user_id) %>% mutate(n = n())
+cat('Number of raters who rated less than 4 books: ', uniqueN(ratings[N <= 2, user_id]))
+ratings <- ratings[N > 2]
+```
+
+```{r}
+### Select a subset of users: 40%
+set.seed(1)
+user_ratio <- 0.4
+users <- unique(ratings$user_id)
+users
+sample_users <- sample(users, round(user_ratio * length(users)))
+sample_users
+
+cat('Number of ratings (before): ', nrow(ratings))
+ratings <- ratings[user_id %in% sample_users]
+cat('Number of ratings (after): ', nrow(ratings))
+```
+Data Exploration
+
+```{r}
+#Distribution of ratings
+ratings %>% 
+  ggplot(aes(x = rating, fill = factor(rating))) +
+  geom_bar(color = "cadetblue3") + scale_fill_brewer(palette = "Yellow") + guides(fill = FALSE)
+
+#Number of ratings per user
+ratings %>% 
+  group_by(user_id) %>% 
+  summarize(number_of_ratings_per_user = n()) %>% 
+  ggplot(aes(number_of_ratings_per_user)) + 
+  geom_bar(fill = "yellow", color = "grey20") + coord_cartesian(c(5, 60))
+
+#Number of ratings per book
+ratings %>% 
+  group_by(book_id) %>% 
+  summarize(number_of_ratings_per_book = n()) %>% 
+  ggplot(aes(number_of_ratings_per_book)) + 
+  geom_bar(fill = "blue", color = "grey20", width = 1) + coord_cartesian(c(0,40))
+
+
+```
+
+```{r}
+#Mean user ratings distributions
+ratings %>% 
+  group_by(user_id) %>% 
+  summarize(mean_user_rating = mean(rating)) %>% 
+  ggplot(aes(mean_user_rating)) +
+  geom_histogram(fill = "brown", color = "grey")
+#This could mean users really like all the books or 
+#they rated books that they liked
+
+#Mean book ratings distributions
+ratings %>% 
+  group_by(book_id) %>% 
+  summarize(mean_book_rating = mean(rating)) %>% 
+  ggplot(aes(mean_book_rating)) + geom_histogram(fill = "purple", color = "grey") + coord_cartesian(c(0,5))
+#This does not tell much about the distribution
+```
+
+```{r}
+#Distribution for genres
+#Matching the tags provided by goodreads
+genres <- str_to_lower(c("Art", "Biography", "Business", "Chick Lit", "Children's", "Christian", "Classics", "Comics", "Contemporary", "Cookbooks", "Crime", "Ebooks", "Fantasy", "Fiction", "Gay and Lesbian", "Graphic Novels", "Historical Fiction", "History", "Horror", "Humor and Comedy", "Manga", "Memoir", "Music", "Mystery", "Nonfiction", "Paranormal", "Philosophy", "Poetry", "Psychology", "Religion", "Romance", "Science", "Science Fiction", "Self Help", "Suspense", "Spirituality", "Sports", "Thriller", "Travel", "Young Adult"))
+genres
+exclude_genres <- c("fiction", "nonfiction", "ebooks", "contemporary")
+genres <- setdiff(genres, exclude_genres)
+
+available_genres <- genres[str_to_lower(genres) %in% tags$tag_name]
+available_tags <- tags$tag_id[match(available_genres, tags$tag_name)]
+available_genres
+available_tags
+
+tmp <- book_tags %>% 
+  filter(tag_id %in% available_tags) %>% 
+  group_by(tag_id) %>%
+  summarize(n = n()) %>%
+  ungroup() %>%
+  mutate(sumN = sum(n), percentage = n / sumN) %>%
+  arrange(-percentage) %>%
+  left_join(tags, by = "tag_id")
+
+tmp %>% 
+  ggplot(aes(reorder(tag_name, percentage), percentage, fill = percentage)) + geom_bar(stat = "identity") + coord_flip() + scale_fill_distiller(palette = 'Blue') + labs(y = 'Genre', x = 'Percentage')
+#Fantasy, Romancec and Mystery genre has highest number of books
+```
+
+
+
+```{r}
+#Checking for most popular edition of the book
+
+p1 <- books %>% 
+  mutate(language = factor(language_code)) %>% 
+  group_by(language) %>% 
+  summarize(number_of_books = n()) %>% 
+  arrange(-number_of_books) %>% 
+  ggplot(aes(reorder(language, number_of_books), number_of_books, fill = reorder(language, number_of_books))) +
+  geom_bar(stat = "identity", color = "grey", size = 0.4) + coord_flip() +
+  labs(x = "language", title = "english included") + guides(fill = FALSE)
+
+p2 <- books %>% 
+  mutate(language = factor(language_code)) %>% 
+  filter(!language %in% c("en-US", "en-GB", "eng", "en-CA", "")) %>% 
+  group_by(language) %>% 
+  summarize(number_of_books = n()) %>% 
+  arrange(-number_of_books) %>% 
+  ggplot(aes(reorder(language, number_of_books), number_of_books, fill = reorder(language, number_of_books))) +
+  geom_bar(stat = "identity", color = "grey", size = 0.45) + coord_flip() +
+  labs(x = "", title = "english excluded") + guides(fill = FALSE)
+p1
+p2
+
+
+```
+
+Top 10 rated books
+```{r}
+books %>% 
+  #mutate(image = paste0('<img src="', small_image_url, '"></img>')) %>% 
+  arrange(-average_rating) %>% 
+  top_n(10,wt = average_rating) %>% 
+  #select(image, title, ratings_count, average_rating) %>% 
+  datatable(class = "nowrap hover row-border", escape = FALSE, options = list(dom = 't',scrollX = TRUE, autoWidth = TRUE))
+```
+
+Correlation of book rating with features
+```{r}
+#small correlations between the features and the average rating 
+#No strong correlation between average rating and book features
+#Hence rating might depend more strongly on other features
+tmp <- books %>% 
+  select(one_of(c("books_count","original_publication_year","ratings_count", "work_ratings_count", "work_text_reviews_count", "average_rating"))) %>% 
+  as.matrix()
+
+corrplot(cor(tmp, use ='pairwise.complete.obs'), method="number",
+         type = "upper")
+#Strong relationship  between work_ratings_count and work_text_reviews_count
+```
+
+Relationship between average rating and number of ratings
+```{r}
+#Popularity of book does not mean that rating of the book would be high.
+#Correlation is very less, 0.045
+get_cor <- function(df){
+    m <- cor(df$x,df$y, use="pairwise.complete.obs");
+    eq <- substitute(bold(r) == cor, list(cor = format(m, digits = 2)))
+    #eq
+    as.character(as.expression(eq));                 
+}
+
+books %>% 
+  filter(ratings_count < 1e+5) %>% 
+  ggplot(aes(ratings_count, average_rating)) + stat_bin_hex(bins = 100) + scale_fill_distiller(palette = "GrandBudapest") + 
+  stat_smooth(method = "lm", color = "orange", size = 2) +
+  annotate("text", x = 50000, y = 3, label = get_cor(data.frame(x = books$ratings_count, y = books$average_rating)), parse = TRUE, color = "blue", size = 7)
+
+
+```
+
+```{r Frequent raters ratings}
+#Checking whether users who rate more books rate them differently
+#Plot shows frequent raters tend to give lower ratings to books
+get_cor <- function(df){
+    m <- cor(df$x,df$y, use="pairwise.complete.obs");
+    eq <- substitute(bold(r) == cor, list(cor = format(m, digits = 2)))
+    as.character(as.expression(eq));                 
+}
+tmp <- ratings %>% 
+  group_by(user_id) %>% 
+  summarize(mean_rating = mean(rating), number_of_rated_books = n())
+
+tmp %>% filter(number_of_rated_books <= 100) %>% 
+  ggplot(aes(number_of_rated_books, mean_rating)) + stat_bin_hex(bins = 50) + scale_fill_distiller(palette = "MoonRise") + stat_smooth(method = "lm", color = "orchid", size = 2, se = FALSE) +
+  annotate("text", x = 80, y = 2.5, label = get_cor(data.frame(x = tmp$number_of_rated_books, y = tmp$mean_rating)), color = "orchid", size = 7, parse = TRUE)
+
+```
+
+
+
+```{r Do books as part of series have higher rating}
+books <- books %>% 
+  mutate(subtitle = str_detect(books$title, ':') * 1, subtitle = factor(subtitle))
+
+books %>% 
+  ggplot(aes(subtitle, average_rating, group = subtitle, color = subtitle)) + 
+  geom_boxplot() + guides(color = FALSE)
+
+#correlation is high, meaning more volumes present in the series of book, the higher the average rating is.
+```
+
+
+```{r What effect does number of author has on book rating}
+books <- books %>% 
+  group_by(book_id) %>% 
+  mutate(number_of_authors = length(str_split(authors, ",")[[1]]))
+
+books %>% filter(number_of_authors <= 15) %>% 
+  ggplot(aes(number_of_authors, average_rating)) + stat_bin_hex(bins = 100) + scale_fill_distiller(palette = "Green") +
+  stat_smooth(method = "lm", size = 2, color = "orchid", se = FALSE) + 
+  annotate("text", x = 8.5, y = 2.75, label = get_cor(data.frame(x = books$number_of_authors, y = books$average_rating)), color = "orchid", size = 7, parse = TRUE)
+#More the number of authors, more is the average rating
+```
+
+# COLLABORATIVE FILTERING
+# Method 1 - Own Algorithm
+
+```{r Building matrix by having user_id in row and book_id in column}
+dimension_names <- list(user_id = sort(unique(ratings$user_id)), book_id = sort(unique(ratings$book_id)))
+ratingmat <- spread(select(ratings, book_id, user_id, rating), book_id, rating) %>% select(-user_id)
+
+ratingmat <- as.matrix(ratingmat)
+dimnames(ratingmat) <- dimension_names
+ratingmat[1:5, 1:5]
+```
+
+
+```{r Finding similar users}
+current_user <- "17329"
+rated_items <- which(!is.na((as.data.frame(ratingmat[current_user, ]))))
+selected_users <- names(which(apply(!is.na(ratingmat[ ,rated_items]), 1, sum) >= 2))
+head(selected_users, 40)
+
+```
+
+```{r Calculating similarity of ratings between users and recommender}
+user1 <- data.frame(item=colnames(ratingmat),rating=ratingmat[current_user,]) %>% filter(!is.na(rating))
+user2 <- data.frame(item=colnames(ratingmat),rating=ratingmat["1339",]) %>% filter(!is.na(rating))
+tmp<-merge(user1, user2, by="item")
+tmp
+
+cor(tmp$rating.x, tmp$rating.y, use="pairwise.complete.obs")
+user2 <- data.frame(item = colnames(ratingmat), rating = ratingmat["21877", ]) %>% filter(!is.na(rating))
+tmp <- merge(user1, user2, by="item")
+tmp
+
+cor(tmp$rating.x, tmp$rating.y, use="pairwise.complete.obs")
+```
+
+```{r Normalize the rating}
+
+rmat <- ratingmat[selected_users, ]
+user_mean_ratings <- rowMeans(rmat,na.rm=T)
+rmat <- rmat - user_mean_ratings
+```
+
+```{r Sorting according to similarity of rating}
+similarities <- cor(t(rmat[rownames(rmat)!=current_user, ]), rmat[current_user, ], use = 'pairwise.complete.obs')
+sim <- as.vector(similarities)
+names(sim) <- rownames(similarities)
+res <- sort(sim, decreasing = TRUE)
+head(res, 40)
+```
+
+```{r Visualize similarity between users}
+sim_mat <- cor(t(rmat), use = 'pairwise.complete.obs')
+random_users <- selected_users[1:20]
+qgraph(sim_mat[c(current_user, random_users), c(current_user, random_users)], layout = "spring", vsize = 5, theme = "TeamFortress", labels = c(current_user, random_users))
+```
+
+```{r Other books predictions}
+similar_users <- names(res[1:4])
+
+similar_users_ratings <- data.frame(item = rep(colnames(rmat), length(similar_users)), rating = c(t(as.data.frame(rmat[similar_users,])))) %>% filter(!is.na(rating))
+
+current_user_ratings <- data.frame(item = colnames(rmat), rating = rmat[current_user,]) %>% filter(!is.na(rating))
+
+predictions <- similar_users_ratings %>% 
+  filter(!(item %in% current_user_ratings$item)) %>% 
+  group_by(item) %>% summarize(mean_rating = mean(rating))
+
+predictions %>% 
+    datatable(class = "nowrap hover row-border", options = list(dom = 't',scrollX = TRUE, autoWidth = TRUE))
+```
+
+```{r Recommending best predictions}
+predictions %>% 
+  arrange(-mean_rating) %>% 
+  top_n(5, wt = mean_rating) %>% 
+  mutate(book_id = as.numeric(as.character(item))) %>% 
+  left_join(select(books, authors, title, book_id), by = "book_id") %>% 
+  select(-item) %>% 
+  datatable(class = "nowrap hover row-border", options = list(dom = 't',scrollX = TRUE, autoWidth = TRUE))
+```
+
+
+#Method 2 - Recoomenderlab R package
+
+```{r Creating Sparse Matrix}
+ratingmat0 <- ratingmat
+ratingmat0[is.na(ratingmat0)] <- 0
+sparse_ratings <- as(ratingmat0, "sparseMatrix")
+rm(ratingmat0)
+gc()
+real_ratings <- new("realRatingMatrix", data = sparse_ratings)
+real_ratings
+```
+
+```{r Creating UBCF model and predicting}
+model <- Recommender(real_ratings, method = "UBCF", param = list(method = "pearson", nn = 4))
+
+#Making predictions 
+prediction <- predict(model, real_ratings[current_user, ], type = "ratings")
+
+as(prediction, 'data.frame') %>% 
+  arrange(-rating) %>% .[1:5,] %>% 
+  mutate(book_id = as.numeric(as.character(item))) %>% 
+  left_join(select(books, authors, title, book_id), by = "book_id") %>% 
+  select(-item) %>% 
+  datatable(class = "nowrap hover row-border", escape = FALSE, options = list(dom = 't',scrollX = TRUE, autoWidth = TRUE))  
+```
+
+```{r Comparing Algorithms}
+scheme <- evaluationScheme(real_ratings[1:500,], method = "cross-validation", k = 10, given = -1, goodRating = 5)
+algorithms <- list("random" = list(name = "RANDOM", param = NULL),
+                   "UBCF_05" = list(name = "UBCF", param = list(nn = 05)),
+                   "UBCF_10" = list(name = "UBCF", param = list(nn = 10)),
+                   "UBCF_30" = list(name = "UBCF", param = list(nn = 30)),                   
+                   "UBCF_50" = list(name = "UBCF", param = list(nn = 50))
+                   )
+# evaluate the alogrithms with the given scheme            
+results <- evaluate(scheme, algorithms, type = "ratings")
+```
+
+```{r restructure results output}
+tmp <- lapply(results, function(x) slot(x, "results"))
+res <- tmp %>% 
+  lapply(function(x) unlist(lapply(x, function(x) unlist(x@cm[ ,"RMSE"])))) %>% 
+  as.data.frame() %>% 
+  gather(key = "Algorithm", value = "RMSE")
+
+res %>% 
+  ggplot(aes(Algorithm, RMSE, fill = Algorithm)) +
+  geom_bar(stat = "summary") + geom_errorbar(stat = "summary", width = 0.3, size = 0.8) +
+  coord_cartesian(ylim = c(0.6, 1.3)) + guides(fill = FALSE)
+```
+
+```{r Comparing different Algorithms}
+
+scheme <- evaluationScheme(real_ratings[1:500,], method = "cross-validation", k = 10, given = -1, goodRating = 5)
+
+algorithms <- list("random" = list(name = "RANDOM", param = NULL),
+                   "popular" = list(name = "POPULAR"),
+                    "SVD" = list(name = "SVD"),
+                   "UBCF" = list(name = "UBCF")
+                   #"IBCF" = list(name = "IBCF")
+                  
+                   )
+                   
+results <- evaluate(scheme, algorithms, type = "ratings", progress = FALSE)
+```
+
+```{r Visualize Different Algorithms Performance}
+tmp <- lapply(results, function(x) slot(x, "results"))
+res <- tmp %>% 
+  lapply(function(x) unlist(lapply(x, function(x) unlist(x@cm[ ,"RMSE"])))) %>% 
+  as.data.frame() %>% 
+  gather(key = "Algorithm", value = "RMSE")
+
+res %>% 
+  mutate(Algorithm=factor(Algorithm, levels = c("random", "popular", "SVD","UBCF"))) %>%
+  ggplot(aes(Algorithm, RMSE, fill = Algorithm)) + geom_bar(stat = "summary") + 
+  geom_errorbar(stat = "summary", width = 0.3, size = 0.8) + coord_cartesian(ylim = c(0.6, 1.3)) + 
+  guides(fill = FALSE)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot
